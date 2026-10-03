@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 import asyncpg
 import os
 from dotenv import load_dotenv
+from .models import RouteRequest
 
 load_dotenv()
 
@@ -43,3 +44,15 @@ async def db_status():
             return {"database_status": "connected", "total_nodes": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Route requests
+@app.post("/api/v1/route")
+async def get_route(request: RouteRequest):
+    requestJSON = request.model_dump()  # Returns python dictionary with python objects
+    return {
+        "message" : "request received", 
+        "route" : "fake_route_id", 
+        "vehicle_type" : request.vehicle_type.value,
+        "optimisation_choice" : request.optimise_for.value
+    }
