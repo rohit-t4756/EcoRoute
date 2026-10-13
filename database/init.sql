@@ -28,5 +28,6 @@ create table edges (
     speed_limit int,
     -- categorisation
     road_category  road_cat default 'district_roads',
-    road_type road_t default 'unpaved'
+    road_type road_t default 'unpaved',
+    geometry geometry(LineString, 4326)
 );
