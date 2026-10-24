@@ -5,20 +5,41 @@ import '@mapbox/mapbox-gl-geocoder/dist/mapbox-gl-geocoder.css';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import mapboxgl from 'mapbox-gl';
 
+// Paste your token here (or use import.meta.env.VITE_MAPBOX_TOKEN with a .env file)
 const MAPBOX_TOKEN = 'pk.eyJ1Ijoicmo3Mzc2IiwiYSI6ImNtdmxhcG80NzBjeHoyeXNpYWZzMmZnNzIifQ.RNNrLWyS_gmmG3OQZeGwog';
 
-// backend. Expected return shape:
-// {
-//   fastest: GeoJSON LineString geometry (or null),
-//   eco: GeoJSON LineString geometry (or null),
-//   analytics: { co2: number (g), fuel: number (ml), money: string/number (₹) }
-// }
-async function fetchRoute(origin, dest, urgency, vehicle) {
-  return {
-    fastest: null,
-    eco: null,
-    analytics: { co2: 0, fuel: 0, money: '0.00' },
-  };
+// Backend address (uvicorn default)
+const API_URL = 'http://localhost:8000/api/v1/route';
+
+// Your dropdown values -> backend VehicleEnum values
+const VEHICLE_MAP = { petrol: 'ice', diesel: 'ice', hybrid: 'hev', electric: 'ev' };
+
+// Fetches ALL routes once. Backend format:
+// { "route": [ { "1": LineString }, { "5": LineString }, { "10": LineString } ] }
+// Lowest key = most eco, highest key = fastest.
+async function fetchRoute(origin, dest, vehicle) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      start_lon: origin.longitude,
+      start_lat: origin.latitude,
+      end_lon: dest.longitude,
+      end_lat: dest.latitude,
+      vehicle_type: VEHICLE_MAP[vehicle],
+      optimise_for: 'balanced', // placeholder: remove once backend no longer requires it
+    }),
+  });
+  if (!res.ok) throw new Error(`Backend error ${res.status}`);
+  const data = await res.json();
+
+  // [{ "1": geometry }, { "5": geometry }] -> [{ value: 1, geometry }, { value: 5, geometry }]
+  return (data.route ?? [])
+    .map((item) => {
+      const [key, geometry] = Object.entries(item)[0];
+      return { value: Number(key), geometry };
+    })
+    .sort((a, b) => a.value - b.value);
 }
 
 function App() {
@@ -39,9 +60,12 @@ function App() {
   const [vehicle, setVehicle] = useState('petrol');
 
   // Route results
-  const [fastestRoute, setFastestRoute] = useState(null);
-  const [ecoRoute, setEcoRoute] = useState(null);
-  const [analytics, setAnalytics] = useState(null);
+  const [routes, setRoutes] = useState([]); // all routes from backend, kept in memory
+  const [fastestRoute, setFastestRoute] = useState(null); // gray line
+  const [ecoRoute, setEcoRoute] = useState(null); // green line (selected by slider)
+
+  // Analytics stay at zero until the real numbers are available
+  const [analytics, setAnalytics] = useState({ co2: 0, fuel: 0, money: '0.00' });
 
   const originRef = useRef(null);
   const destinationRef = useRef(null);
@@ -119,22 +143,17 @@ function App() {
     });
   }, [mapInstance]);
 
-  // Debounced route request: waits 200ms after the last change
+  // Fetch all routes once, when pins or vehicle change (slider does NOT trigger this)
   useEffect(() => {
     if (!originCoords || !destinationCoords) {
-      setFastestRoute(null);
-      setEcoRoute(null);
-      setAnalytics(null);
+      setRoutes([]);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const r = await fetchRoute(originCoords, destinationCoords, urgency, vehicle);
-        if (cancelled) return;
-        setFastestRoute(r.fastest);
-        setEcoRoute(r.eco);
-        setAnalytics(r.analytics);
+        const r = await fetchRoute(originCoords, destinationCoords, vehicle);
+        if (!cancelled) setRoutes(r);
       } catch (err) {
         console.error('Route fetch failed', err);
       }
@@ -143,7 +162,24 @@ function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [originCoords, destinationCoords, urgency, vehicle]);
+  }, [originCoords, destinationCoords, vehicle]);
+
+  // Slider picks the nearest route from memory (no API call)
+  useEffect(() => {
+    if (routes.length === 0) {
+      setFastestRoute(null);
+      setEcoRoute(null);
+      return;
+    }
+    const min = routes[0].value;
+    const max = routes[routes.length - 1].value;
+    const target = min + (urgency / 100) * (max - min);
+    const selected = routes.reduce((best, r) =>
+      Math.abs(r.value - target) < Math.abs(best.value - target) ? r : best
+    );
+    setEcoRoute(selected.geometry); // green line = selected route
+    setFastestRoute(routes[routes.length - 1].geometry); // gray line = fastest route
+  }, [routes, urgency]);
 
   // Smooth update with setData (no map remount)
   useEffect(() => {
@@ -253,8 +289,8 @@ function App() {
         </div>
       </div>
 
-      {/* ANALYTICS CARD */}
-      {analytics && (
+      {/* ANALYTICS CARD (shows as soon as both pins are set; zeros for now) */}
+      {originCoords && destinationCoords && (
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 w-[92%] max-w-xl rounded-2xl bg-gray-900/85 backdrop-blur-md border border-white/10 shadow-2xl p-5">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold text-green-400">Your eco impact</h2>
