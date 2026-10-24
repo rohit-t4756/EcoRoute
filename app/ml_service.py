@@ -1,7 +1,9 @@
 import redis
 import os
-import random
+import numpy as np
+from datetime import datetime
 from dotenv import load_dotenv
+from scripts.ml_pipeline.inference import get_predictor
 
 # load the .env file in memory for os.getenv() to work
 load_dotenv()
@@ -14,6 +16,8 @@ class MLTrafficBridge:
             decode_responses = True
         )
         self.pipe = self.r.pipeline()
+        model_path = os.path.join("app", "ml", "traffic_model.onnx")
+        self.predictor = get_predictor(model_path)
 
     def connection_verification(self) -> bool:
         try:
@@ -22,18 +26,33 @@ class MLTrafficBridge:
             return False
 
     def update_edge_weights(self, edgeIDs: list[int]):
-        # looping through the edgeIDs and inserting them into the redis
-        # TODO: Get this congestion factor from ML pipeline.
-        for id in edgeIDs:
-            congestion_factor = round(random.uniform(1.0, 3.0), 2)
+        # Get real-time context for ML model
+        now = datetime.now()
+        hour = now.hour
+        day = now.weekday()
+        rain_mm = 0.0  # Defaulting to clear weather; TODO: Integrate with weather API for real-time precipitation data
+
+        # Build feature matrix (Shape: (N, 4)) for batch prediction
+        features = []
+        for _ in edgeIDs:
+            # TODO: Query PostGIS here to get the actual road_type (0, 1, or 2) for this specific edge
+            mock_road_type = np.random.randint(0, 3) 
+            features.append([hour, day, mock_road_type, rain_mm])
+
+        # Execute inference
+        congestion_factors = self.predictor.predict_batch(np.array(features))
+
+        # Push predictions to Redis
+        for i, id in enumerate(edgeIDs):
             try:
                 self.pipe.set(
                     name = f"edge_weight:{id}",
-                    value = congestion_factor,
-                    ex = 300
+                    value = round(float(congestion_factors[i]), 3),
+                    ex = 300  # Cache for 5 minutes
                 )
             except Exception as e:
-                pass
+                print(f"Error occurred while caching edge ID {id}: {e}")
+
 
         self.pipe.execute()
         return f"Successfully cached {len(edgeIDs)} edges."
