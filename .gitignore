@@ -6,3 +6,4 @@ __pycache__/
 .vscode/
 osm_pbf_download/
 cache/
+tests/
