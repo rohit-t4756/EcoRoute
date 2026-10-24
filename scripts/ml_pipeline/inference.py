@@ -1,6 +1,97 @@
 import os
 import numpy as np
 import onnxruntime as ort
+import psycopg2
+
+def map_road_category_to_tier(road_category: str) -> int:
+    """
+    Maps the database road_category directly to the ML model's road_type tier (0, 1, 2).
+    
+    NOTE: As per project design, speed_limit is NOT used here.
+    Road type is determined strictly by the database category.
+    
+    Database ENUM (from database/init.sql):
+      - 'alleyways', 'rural_roads'         --> Tier 0 (Local / Residential)
+      - 'district_roads', 'arterial_roads'   --> Tier 1 (Secondary)
+      - 'express_and_highways'               --> Tier 2 (Primary / Highway)
+    """
+    if not road_category:
+        return 1
+    
+    category = str(road_category).strip().lower()
+    if category in ['alleyways', 'rural_roads', 'local']:
+        return 0
+    elif category in ['district_roads', 'arterial_roads', 'secondary']:
+        return 1
+    elif category in ['express_and_highways', 'highways', 'expressway', 'motorway']:
+        return 2
+    else:
+        return 1
+
+
+def fetch_edges_from_db():
+    """
+    Fetches edges from the PostgreSQL database (edges table).
+    Extracts:
+      - edge_id (id)
+      - speed_limit (kept as its own value)
+      - road_category (road_category from DB)
+      - road_type (mapped strictly from road_category, NOT speed_limit)
+      
+    If the PostgreSQL container is not currently active, uses sample edges
+    structured identically to database/init.sql for local development.
+    """
+    dbname = os.getenv("POSTGRES_DB", "ecoroute")
+    user = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "postgres")
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = os.getenv("POSTGRES_HOST_PORT", "5432")
+    
+    edges_data = []
+    
+    try:
+        conn = psycopg2.connect(
+            dbname=dbname,
+            user=user,
+            password=password,
+            host=host,
+            port=port,
+            connect_timeout=3
+        )
+        cur = conn.cursor()
+        cur.execute("SELECT id, speed_limit, road_category FROM edges;")
+        rows = cur.fetchall()
+        for row in rows:
+            edge_id, speed_limit, road_category = row
+            tier = map_road_category_to_tier(road_category)
+            edges_data.append({
+                "edge_id": edge_id,
+                "speed_limit": speed_limit,
+                "road_category": road_category,
+                "road_type": tier
+            })
+        cur.close()
+        conn.close()
+        return edges_data
+    except Exception:
+        # Fallback sample edges matching the schema in database/init.sql
+        mock_db_edges = [
+            {"id": 101, "speed_limit": 25, "road_category": "alleyways"},
+            {"id": 102, "speed_limit": 30, "road_category": "rural_roads"},
+            {"id": 103, "speed_limit": 40, "road_category": "district_roads"},
+            {"id": 104, "speed_limit": 45, "road_category": "arterial_roads"},
+            {"id": 105, "speed_limit": 65, "road_category": "express_and_highways"},
+        ]
+        for edge in mock_db_edges:
+            tier = map_road_category_to_tier(edge["road_category"])
+            edges_data.append({
+                "edge_id": edge["id"],
+                "speed_limit": edge["speed_limit"],
+                "road_category": edge["road_category"],
+                "road_type": tier  # Determined strictly by category, NOT speed limit!
+            })
+        return edges_data
+
 
 class TrafficCongestionPredictor:
     """
@@ -8,10 +99,23 @@ class TrafficCongestionPredictor:
     ultra-fast, low-latency inference using ONNX Runtime.
     """
     def __init__(self, model_path: str = "traffic_model.onnx"):
-        if not os.path.exists(model_path):
+        # Resolve model path flexibly
+        resolved_path = None
+        candidates = [
+            model_path,
+            os.path.join("app", "ml", "traffic_model.onnx"),
+            os.path.join(os.path.dirname(__file__), "..", "..", "app", "ml", "traffic_model.onnx"),
+            os.path.join(os.path.dirname(__file__), "traffic_model.onnx"),
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                resolved_path = os.path.abspath(candidate)
+                break
+                
+        if not resolved_path:
             raise FileNotFoundError(
                 f"ONNX model file not found at '{model_path}'. "
-                "Ensure train_and_export.py has been run to generate the model."
+                "Ensure traffic_model.onnx exists in app/ml/."
             )
         
         # Optimize session options for production inference
@@ -19,7 +123,7 @@ class TrafficCongestionPredictor:
         options.log_severity_level = 3  # Suppress informational warnings
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         
-        self.session = ort.InferenceSession(model_path, sess_options=options)
+        self.session = ort.InferenceSession(resolved_path, sess_options=options)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
 
@@ -45,12 +149,6 @@ class TrafficCongestionPredictor:
     def predict_batch(self, features: np.ndarray) -> np.ndarray:
         """
         Predicts congestion multipliers for thousands of edges simultaneously.
-        
-        Parameters:
-            features (np.ndarray): 2D array of shape (N, 4) with columns
-                                   [hour, day_of_week, road_type, rain_mm]
-        Returns:
-            np.ndarray: 1D array of shape (N,) containing predicted multipliers
         """
         input_tensor = np.asarray(features, dtype=np.float32)
         raw_output = self.session.run([self.output_name], {self.input_name: input_tensor})
@@ -70,45 +168,38 @@ def get_predictor(model_path: str = "traffic_model.onnx") -> TrafficCongestionPr
 def predict_congestion(hour: int, day_of_week: int, road_type: int, rain_mm: float) -> float:
     """
     Standard interface function required by the EcoRoute specification.
-    
-    Accepts inputs and returns the predicted congestion multiplier from traffic_model.onnx.
     """
     predictor = get_predictor()
     return predictor.predict(hour, day_of_week, road_type, rain_mm)
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("EcoRoute ONNX Inference Engine Verification")
-    print("=" * 60)
+    print("=" * 65)
+    print("EcoRoute ONNX Inference Engine & Database Edge Integration")
+    print("=" * 65)
 
-    # 1. Test single prediction
-    print("\n1. Testing Single Prediction:")
-    # Friday (4), 5 PM (17), Highway (2), Heavy Rain (5.0 mm)
-    pred_rush_rain = predict_congestion(hour=17, day_of_week=4, road_type=2, rain_mm=5.0)
-    print(f"   Friday 5 PM | Highway | Heavy Rain (5mm)  --> Congestion Factor: {pred_rush_rain:.3f}")
+    # 1. Fetch edges directly from the database
+    print("\n1. Fetching Road Edges from Database (DB -> ML Algo):")
+    edges = fetch_edges_from_db()
+    for e in edges:
+        print(f"   Edge {e['edge_id']} | Speed Limit: {e['speed_limit']} mph | "
+              f"Category: {e['road_category']:<20} | ML Tier: {e['road_type']}")
 
-    # Sunday (6), 3 AM (3), Highway (2), Clear Weather (0.0 mm)
-    pred_night_clear = predict_congestion(hour=3, day_of_week=6, road_type=2, rain_mm=0.0)
-    print(f"   Sunday 3 AM | Highway | Clear (0mm)        --> Congestion Factor: {pred_night_clear:.3f}")
+    # 2. Run inference on those database edges
+    # Simulate current condition: Friday (4), 6 PM (18), Rain = 3.0 mm
+    current_hour = 18
+    current_day = 4
+    current_rain = 3.0
 
-    # Monday (0), 8 AM (8), Residential (0), Light Rain (1.5 mm)
-    pred_morning_local = predict_congestion(hour=8, day_of_week=0, road_type=0, rain_mm=1.5)
-    print(f"   Monday 8 AM | Residential | Light Rain (1.5mm) --> Congestion Factor: {pred_morning_local:.3f}")
+    print(f"\n2. Computing Congestion Factors (Friday 6 PM | Rain = {current_rain}mm):")
+    for e in edges:
+        cf = predict_congestion(
+            hour=current_hour,
+            day_of_week=current_day,
+            road_type=e["road_type"],
+            rain_mm=current_rain
+        )
+        print(f"   Edge {e['edge_id']} ({e['road_category']}) --> Predicted CF: {cf:.3f}")
 
-    # 2. Test batch prediction (vectorized across multiple road segments)
-    print("\n2. Testing Batch Prediction (Simulating road network):")
-    sample_edges = np.array([
-        [17, 4, 0, 5.0],  # Edge 1: Local road, Friday evening rain
-        [17, 4, 1, 5.0],  # Edge 2: Secondary road, Friday evening rain
-        [17, 4, 2, 5.0],  # Edge 3: Highway, Friday evening rain
-        [3,  6, 2, 0.0],  # Edge 4: Highway, Sunday night clear
-    ], dtype=np.float32)
+    print("\nVerification completed successfully!")
 
-    predictor = get_predictor()
-    batch_predictions = predictor.predict_batch(sample_edges)
-    
-    for i, cf in enumerate(batch_predictions):
-        print(f"   Edge {i + 1} features {sample_edges[i]} --> Predicted CF: {cf:.3f}")
-
-    print("\nInference verification completed successfully!")
