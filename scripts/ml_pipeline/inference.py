@@ -7,11 +7,8 @@ def map_road_category_to_tier(road_category: str) -> int:
     """
     Maps the database road_category directly to the ML model's road_type tier (0, 1, 2).
     
-    NOTE: As per project design, speed_limit is NOT used here.
-    Road type is determined strictly by the database category.
-    
     Database ENUM (from database/init.sql):
-      - 'alleyways', 'rural_roads'         --> Tier 0 (Local / Residential)
+      - 'alleyways', 'rural_roads'           --> Tier 0 (Local / Residential)
       - 'district_roads', 'arterial_roads'   --> Tier 1 (Secondary)
       - 'express_and_highways'               --> Tier 2 (Primary / Highway)
     """
@@ -32,14 +29,7 @@ def map_road_category_to_tier(road_category: str) -> int:
 def fetch_edges_from_db():
     """
     Fetches edges from the PostgreSQL database (edges table).
-    Extracts:
-      - edge_id (id)
-      - speed_limit (kept as its own value)
-      - road_category (road_category from DB)
-      - road_type (mapped strictly from road_category, NOT speed_limit)
-      
-    If the PostgreSQL container is not currently active, uses sample edges
-    structured identically to database/init.sql for local development.
+    Extracts road attributes (speed limit, category, tier, lanes, one-way) for Shivaji Nagar, Pune.
     """
     dbname = os.getenv("POSTGRES_DB", "ecoroute")
     user = os.getenv("POSTGRES_USER", "postgres")
@@ -64,31 +54,43 @@ def fetch_edges_from_db():
         for row in rows:
             edge_id, speed_limit, road_category = row
             tier = map_road_category_to_tier(road_category)
+            
+            # Infer realistic physical attributes based on road category if not explicitly in table
+            speed_val = speed_limit if speed_limit else (30 if tier == 0 else (50 if tier == 1 else 80))
+            lanes = 1 if tier == 0 else (2 if tier == 1 else 3)
+            is_oneway = 1 if tier == 2 else 0
+            
             edges_data.append({
                 "edge_id": edge_id,
-                "speed_limit": speed_limit,
+                "speed_limit_kmh": speed_val,
                 "road_category": road_category,
-                "road_type": tier
+                "road_type": tier,
+                "lanes": lanes,
+                "is_oneway": is_oneway
             })
         cur.close()
         conn.close()
         return edges_data
     except Exception:
-        # Fallback sample edges matching the schema in database/init.sql
-        mock_db_edges = [
-            {"id": 101, "speed_limit": 25, "road_category": "alleyways"},
-            {"id": 102, "speed_limit": 30, "road_category": "rural_roads"},
-            {"id": 103, "speed_limit": 40, "road_category": "district_roads"},
-            {"id": 104, "speed_limit": 45, "road_category": "arterial_roads"},
-            {"id": 105, "speed_limit": 65, "road_category": "express_and_highways"},
+        # Fallback sample edges matching Shivaji Nagar Pune road types
+        mock_pune_edges = [
+            {"id": 101, "name": "Narrow Market Lane", "speed_limit_kmh": 20, "road_category": "alleyways", "lanes": 1, "is_oneway": 0},
+            {"id": 102, "name": "Residential Access", "speed_limit_kmh": 30, "road_category": "rural_roads", "lanes": 1, "is_oneway": 0},
+            {"id": 103, "name": "Connecting Collector Road", "speed_limit_kmh": 40, "road_category": "district_roads", "lanes": 2, "is_oneway": 0},
+            {"id": 104, "name": "Arterial Road (Two-Way)", "speed_limit_kmh": 50, "road_category": "arterial_roads", "lanes": 2, "is_oneway": 0},
+            {"id": 105, "name": "FC Road (Major One-Way)", "speed_limit_kmh": 50, "road_category": "arterial_roads", "lanes": 3, "is_oneway": 1},
+            {"id": 106, "name": "Old Pune-Mumbai Highway", "speed_limit_kmh": 80, "road_category": "express_and_highways", "lanes": 4, "is_oneway": 1},
         ]
-        for edge in mock_db_edges:
+        for edge in mock_pune_edges:
             tier = map_road_category_to_tier(edge["road_category"])
             edges_data.append({
                 "edge_id": edge["id"],
-                "speed_limit": edge["speed_limit"],
+                "name": edge["name"],
+                "speed_limit_kmh": edge["speed_limit_kmh"],
                 "road_category": edge["road_category"],
-                "road_type": tier  # Determined strictly by category, NOT speed limit!
+                "road_type": tier,
+                "lanes": edge["lanes"],
+                "is_oneway": edge["is_oneway"]
             })
         return edges_data
 
@@ -96,10 +98,9 @@ def fetch_edges_from_db():
 class TrafficCongestionPredictor:
     """
     Production helper class to load traffic_model.onnx and perform
-    ultra-fast, low-latency inference using ONNX Runtime.
+    ultra-fast, low-latency inference using ONNX Runtime for Pune traffic.
     """
     def __init__(self, model_path: str = "traffic_model.onnx"):
-        # Resolve model path flexibly
         resolved_path = None
         candidates = [
             model_path,
@@ -115,47 +116,91 @@ class TrafficCongestionPredictor:
         if not resolved_path:
             raise FileNotFoundError(
                 f"ONNX model file not found at '{model_path}'. "
-                "Ensure traffic_model.onnx exists in app/ml/."
+                "Ensure traffic_model.onnx exists."
             )
         
-        # Optimize session options for production inference
         options = ort.SessionOptions()
-        options.log_severity_level = 3  # Suppress informational warnings
+        options.log_severity_level = 3
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         
         self.session = ort.InferenceSession(resolved_path, sess_options=options)
         self.input_name = self.session.get_inputs()[0].name
         self.output_name = self.session.get_outputs()[0].name
+        self.num_features = self.session.get_inputs()[0].shape[1]
 
-    def predict(self, hour: int, day_of_week: int, road_type: int, rain_mm: float) -> float:
+    def predict(
+        self, 
+        hour: int, 
+        day_of_week: int, 
+        road_type: int, 
+        rain_mm: float,
+        speed_limit_kmh: int = 40,
+        lanes: int = 2,
+        is_oneway: int = 0,
+        temperature_2m: float = 28.0
+    ) -> float:
         """
         Predicts congestion multiplier for a single set of inputs.
-        
-        Parameters:
-            hour (int): 0-23 (Hour of the day)
-            day_of_week (int): 0-6 (0 = Monday, 6 = Sunday)
-            road_type (int): 0 = Local/Residential, 1 = Secondary, 2 = Primary/Highway
-            rain_mm (float): Precipitation in mm
-            
-        Returns:
-            float: Predicted congestion multiplier (c = posted_speed_limit / actual_speed)
+        Supports both 4-feature legacy calls and 9-feature Pune enhanced calls.
         """
-        # Shape: (1, 4) with dtype float32
-        input_tensor = np.array([[hour, day_of_week, road_type, rain_mm]], dtype=np.float32)
+        # Determine Indian peak hour flag
+        is_peak = 1 if (8 <= hour <= 11 or 17 <= hour <= 21) else 0
+        
+        if self.num_features == 9:
+            input_tensor = np.array([[
+                hour, 
+                day_of_week, 
+                is_peak, 
+                road_type, 
+                speed_limit_kmh, 
+                lanes, 
+                is_oneway, 
+                rain_mm, 
+                temperature_2m
+            ]], dtype=np.float32)
+        else:
+            # 4-feature fallback
+            input_tensor = np.array([[hour, day_of_week, road_type, rain_mm]], dtype=np.float32)
+            
         raw_output = self.session.run([self.output_name], {self.input_name: input_tensor})
-        # Extract scalar value from output tensor
         return float(raw_output[0][0][0])
 
     def predict_batch(self, features: np.ndarray) -> np.ndarray:
         """
         Predicts congestion multipliers for thousands of edges simultaneously.
         """
-        input_tensor = np.asarray(features, dtype=np.float32)
-        raw_output = self.session.run([self.output_name], {self.input_name: input_tensor})
+        input_data = np.asarray(features, dtype=np.float32)
+        
+        # If passed 4 features to a 9-feature model, pad with intelligent Indian defaults
+        if input_data.shape[1] == 4 and self.num_features == 9:
+            N = input_data.shape[0]
+            hours = input_data[:, 0]
+            is_peaks = np.where(((hours >= 8) & (hours <= 11)) | ((hours >= 17) & (hours <= 21)), 1.0, 0.0)
+            road_types = input_data[:, 2]
+            
+            # Default speed limits based on road tier
+            speeds = np.where(road_types == 0, 30.0, np.where(road_types == 1, 50.0, 80.0))
+            lanes = np.where(road_types == 0, 1.0, np.where(road_types == 1, 2.0, 3.0))
+            oneways = np.where(road_types == 2, 1.0, 0.0)
+            temps = np.full(N, 28.0, dtype=np.float32)
+            
+            # Reconstruct 9-column matrix: [hour, day, is_peak, road_type, speed, lanes, oneway, rain, temp]
+            input_data = np.column_stack([
+                input_data[:, 0], # hour
+                input_data[:, 1], # day
+                is_peaks,         # is_peak
+                input_data[:, 2], # road_type
+                speeds,           # speed_limit_kmh
+                lanes,            # lanes
+                oneways,          # is_oneway
+                input_data[:, 3], # rain_mm
+                temps             # temp
+            ]).astype(np.float32)
+
+        raw_output = self.session.run([self.output_name], {self.input_name: input_data})
         return raw_output[0].flatten()
 
 
-# Global singleton instance to avoid reloading the ONNX model repeatedly
 _predictor_instance = None
 
 def get_predictor(model_path: str = "traffic_model.onnx") -> TrafficCongestionPredictor:
@@ -165,41 +210,65 @@ def get_predictor(model_path: str = "traffic_model.onnx") -> TrafficCongestionPr
     return _predictor_instance
 
 
-def predict_congestion(hour: int, day_of_week: int, road_type: int, rain_mm: float) -> float:
+def predict_congestion(
+    hour: int, 
+    day_of_week: int, 
+    road_type: int, 
+    rain_mm: float,
+    speed_limit_kmh: int = 40,
+    lanes: int = 2,
+    is_oneway: int = 0,
+    temperature_2m: float = 28.0
+) -> float:
     """
     Standard interface function required by the EcoRoute specification.
     """
     predictor = get_predictor()
-    return predictor.predict(hour, day_of_week, road_type, rain_mm)
+    return predictor.predict(
+        hour=hour,
+        day_of_week=day_of_week,
+        road_type=road_type,
+        rain_mm=rain_mm,
+        speed_limit_kmh=speed_limit_kmh,
+        lanes=lanes,
+        is_oneway=is_oneway,
+        temperature_2m=temperature_2m
+    )
 
 
 if __name__ == "__main__":
-    print("=" * 65)
-    print("EcoRoute ONNX Inference Engine & Database Edge Integration")
-    print("=" * 65)
+    print("=" * 70)
+    print("EcoRoute Pune Traffic ONNX Inference Engine Verification")
+    print("=" * 70)
 
-    # 1. Fetch edges directly from the database
-    print("\n1. Fetching Road Edges from Database (DB -> ML Algo):")
+    # 1. Fetch edges directly from Shivaji Nagar, Pune database
+    print("\n1. Loaded Shivaji Nagar Road Edges:")
     edges = fetch_edges_from_db()
     for e in edges:
-        print(f"   Edge {e['edge_id']} | Speed Limit: {e['speed_limit']} mph | "
-              f"Category: {e['road_category']:<20} | ML Tier: {e['road_type']}")
+        name = e.get("name", f"Edge {e['edge_id']}")
+        print(f"   [{e['edge_id']}] {name:<28} | Limit: {e['speed_limit_kmh']} km/h | "
+              f"Lanes: {e['lanes']} | OneWay: {e['is_oneway']}")
 
-    # 2. Run inference on those database edges
-    # Simulate current condition: Friday (4), 6 PM (18), Rain = 3.0 mm
-    current_hour = 18
-    current_day = 4
-    current_rain = 3.0
+    # 2. Test Congestion Multipliers at Friday 6:30 PM (Evening Rush Hour) with Rain
+    # Weather: Monsoon rain = 4.5 mm, Temp = 26.5 C
+    friday_hour = 18
+    friday_day = 4
+    rain = 4.5
+    temp = 26.5
 
-    print(f"\n2. Computing Congestion Factors (Friday 6 PM | Rain = {current_rain}mm):")
+    print(f"\n2. Real-time Inference (Friday 6:30 PM Rush Hour | Monsoon Rain = {rain}mm):")
     for e in edges:
+        name = e.get("name", f"Edge {e['edge_id']}")
         cf = predict_congestion(
-            hour=current_hour,
-            day_of_week=current_day,
+            hour=friday_hour,
+            day_of_week=friday_day,
             road_type=e["road_type"],
-            rain_mm=current_rain
+            rain_mm=rain,
+            speed_limit_kmh=e["speed_limit_kmh"],
+            lanes=e["lanes"],
+            is_oneway=e["is_oneway"],
+            temperature_2m=temp
         )
-        print(f"   Edge {e['edge_id']} ({e['road_category']}) --> Predicted CF: {cf:.3f}")
+        print(f"   [{e['edge_id']}] {name:<28} --> Predicted CF: {cf:.3f}")
 
     print("\nVerification completed successfully!")
-
