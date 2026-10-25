@@ -11,6 +11,11 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -19,6 +24,36 @@ services:
       - "${REDIS_HOST_PORT}:${REDIS_CONTAINER_PORT}"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ecoroute_api
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/', timeout=2)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   ml_worker:
     build:
@@ -27,13 +62,30 @@ services:
     container_name: ecoroute_ml_worker
     restart: unless-stopped
     depends_on:
-      - database 
-      - redis     
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      - REDIS_HOST=redis
-      - REDIS_CONTAINER_PORT=6379
-      - DATABASE_URL=postgresql+psycopg2://my_ADMIN:helloEcoroute@database:5432/ecorouteDB
+      REDIS_HOST: redis
+      REDIS_CONTAINER_PORT: 6379
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
+
+  frontend:
+    build:
+      context: ./app/frontend
+      dockerfile: Dockerfile
+    container_name: ecoroute_frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./app/frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   redis_data:
+  frontend_node_modules:

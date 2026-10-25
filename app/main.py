@@ -3,10 +3,18 @@ import asyncpg
 import os
 from dotenv import load_dotenv
 from .models import RouteRequest
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
 app = FastAPI(title="EcoRoute API Gateway", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 db_pool = None
 
@@ -18,8 +26,8 @@ async def startup():
             user=os.getenv("POSTGRES_USER"),
             password=os.getenv("POSTGRES_PASSWORD"),
             database=os.getenv("POSTGRES_DB"),
-            host="127.0.0.1",
-            port=os.getenv("POSTGRES_HOST_PORT")
+            host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
+            port=int(os.getenv("POSTGRES_PORT", os.getenv("POSTGRES_HOST_PORT", "5432")))
         )
         print("Successfully connected to PostGIS Database Pool!")
     except Exception as e:
@@ -62,6 +70,7 @@ async def get_route(request: RouteRequest):
         "analytics": {}
     }
     '''
+    print(f"Received route request: {requestJSON}")
     return {
         "message" : "request received", 
         "route" : "fake_route_id", 

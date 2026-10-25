@@ -1,9 +1,33 @@
-Whenever yall start the entire project.
-Use the terminal and do this from now onwards:
-1. docker-compose up -d --build ml_worker           // For database redis and background ml update pipeline
-2. uvicorn app.main:app --reload                    // for fastapi
-3. some node command to run the frontend            // @Rujul, do this
+# EcoRoute development
 
+## Start the entire application
 
-During debugging:
-1. docker logs -f ecoroute_ml_worker                // This lets you look at the logs for the ML background pipeline.
+From the repository root, run:
+
+```bash
+docker compose up --build
+```
+
+This starts PostGIS, Redis, the FastAPI API, the ML worker, and the React/Vite frontend.
+
+- Frontend: http://localhost:5173
+- API: http://localhost:8000
+- API docs: http://localhost:8000/docs
+
+The frontend and API use development mounts, so source changes are picked up automatically.
+
+## Stop the application
+
+```bash
+docker compose down
+```
+
+Add `-v` only when you intentionally want to delete the Postgres and Redis volumes.
+
+## Useful logs
+
+```bash
+docker compose logs -f ml_worker
+docker compose logs -f api
+docker compose logs -f frontend
+```
