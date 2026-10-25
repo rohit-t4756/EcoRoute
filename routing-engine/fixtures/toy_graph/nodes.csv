@@ -1,0 +1,6 @@
+node_id,latitude,longitude,elevation_meters
+1,40,-74,0
+2,40,-73.99,0
+3,40.01,-74,0
+4,40.01,-73.99,0
+99,41,-75,

@@ -1,0 +1,5 @@
+schema_version=1
+graph_version=toy-v1
+traffic_version=toy-traffic-v1
+valid_from_unix_seconds=1700000000
+valid_until_unix_seconds=2000000000

@@ -1,0 +1,26 @@
+# Generated output, local settings, private inputs and credentials.
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CMakeUserPresets.json
+Testing/
+compile_commands.json
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.pdb
+*.log
+*.tmp
+*.bak
+*.swp
+.vscode/
+.idea/
+.env
+.env.*
+data/
+__pycache__/
+*.pyc

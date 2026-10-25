@@ -1,0 +1,6 @@
+edge_id,from_node_id,to_node_id,length_meters,speed_limit_kph,road_class
+103,1,3,500,20,residential
+104,3,4,500,20,residential
+101,1,2,1000,100,primary
+102,2,4,1000,100,primary
+105,1,2,1200,80,primary
