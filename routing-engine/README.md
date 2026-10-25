@@ -12,6 +12,10 @@ turn restrictions and legal-access data are not represented. See
 [API](docs/api.md), [backlog](docs/backlog.md), [validation](docs/validation.md)
 and the [file-by-file change ledger](docs/engineering_changes.md).
 
+## Windows Setup
+
+For complete Windows installation, RoutingKit submodule setup, compilation, testing, VS Code configuration, and troubleshooting, see [Windows Development & Build Guide](docs/windows_setup.md).
+
 ## Build and run
 
 Use CMake >=3.24, Ninja, a C++17 compiler, and a matching built RoutingKit library
