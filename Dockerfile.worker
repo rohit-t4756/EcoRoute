@@ -1,0 +1,27 @@
+# Use a slim Python 3.11 image to minimize container size
+FROM python:3.11-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Install OS-level dependencies required for psycopg2 and ONNX Runtime
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the repository into the container
+COPY . .
+
+# Ensure Python can resolve the 'app' and 'scripts' modules
+ENV PYTHONPATH=/app
+
+# Force Python to print unbuffered standard output
+ENV PYTHONUNBUFFERED=1
+
+# Execute the background daemon
+CMD ["python", "-m", "app.ml_service"]

@@ -20,6 +20,20 @@ services:
     volumes:
       - redis_data:/data
 
+  ml_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ecoroute_ml_worker
+    restart: unless-stopped
+    depends_on:
+      - database 
+      - redis     
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_CONTAINER_PORT=6379
+      - DATABASE_URL=postgresql+psycopg2://my_ADMIN:helloEcoroute@database:5432/ecorouteDB
+
 volumes:
   postgres_data:
   redis_data:

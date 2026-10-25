@@ -4,6 +4,5 @@ venv/
 __pycache__/
 *pyc
 .vscode/
-osm_pbf_download/
 cache/
 tests/

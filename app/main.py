@@ -50,6 +50,18 @@ async def db_status():
 @app.post("/api/v1/route")
 async def get_route(request: RouteRequest):
     requestJSON = request.model_dump()  # Returns python dictionary with python objects
+    # TODO: Get 10 routes from C++ engine and additonal analytics, then sendd them all to the frontend.
+    '''
+    output format:
+    {
+        "route": [
+            { "1": { "type": "LineString", "coordinates": [...] } },
+            { "5": { "type": "LineString", "coordinates": [...] } },
+            { "10": { "type": "LineString", "coordinates": [...] } }
+        ]
+        "analytics": {}
+    }
+    '''
     return {
         "message" : "request received", 
         "route" : "fake_route_id", 
