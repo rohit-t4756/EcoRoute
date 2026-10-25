@@ -32,9 +32,16 @@ async function fetchRoute(origin, dest, vehicle) {
   });
   if (!res.ok) throw new Error(`Backend error ${res.status}`);
   const data = await res.json();
+  console.log('Backend response:', data); // shows exactly what the backend sent
+
+  // The backend may still return a placeholder instead of a list
+  if (!Array.isArray(data.route)) {
+    console.warn('Backend has not returned a route list yet:', data.route);
+    return [];
+  }
 
   // [{ "1": geometry }, { "5": geometry }] -> [{ value: 1, geometry }, { value: 5, geometry }]
-  return (data.route ?? [])
+  return data.route
     .map((item) => {
       const [key, geometry] = Object.entries(item)[0];
       return { value: Number(key), geometry };
@@ -58,6 +65,7 @@ function App() {
   // Controls
   const [urgency, setUrgency] = useState(50);
   const [vehicle, setVehicle] = useState('petrol');
+  const [loading, setLoading] = useState(false);
 
   // Route results
   const [routes, setRoutes] = useState([]); // all routes from backend, kept in memory
@@ -143,26 +151,24 @@ function App() {
     });
   }, [mapInstance]);
 
-  // Fetch all routes once, when pins or vehicle change (slider does NOT trigger this)
+  // Clear old routes when the inputs change (the user presses the button again)
   useEffect(() => {
-    if (!originCoords || !destinationCoords) {
-      setRoutes([]);
-      return;
-    }
-    let cancelled = false;
-    const timer = setTimeout(async () => {
-      try {
-        const r = await fetchRoute(originCoords, destinationCoords, vehicle);
-        if (!cancelled) setRoutes(r);
-      } catch (err) {
-        console.error('Route fetch failed', err);
-      }
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
+    setRoutes([]);
   }, [originCoords, destinationCoords, vehicle]);
+
+  // Runs only when the "Find route" button is pressed
+  const handleFindRoute = async () => {
+    if (!originCoords || !destinationCoords) return;
+    setLoading(true);
+    try {
+      const r = await fetchRoute(originCoords, destinationCoords, vehicle);
+      setRoutes(r);
+    } catch (err) {
+      console.error('Route fetch failed', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Slider picks the nearest route from memory (no API call)
   useEffect(() => {
@@ -198,7 +204,7 @@ function App() {
         {...viewState}
         onMove={(evt) => setViewState(evt.viewState)}
         onLoad={(evt) => setMapInstance(evt.target)}
-        mapStyle="mapbox://styles/mapbox/standard" // change to light-v11, streets-v12, dark-v11, etc.
+        mapStyle="mapbox://styles/mapbox/standard"
         mapboxAccessToken={MAPBOX_TOKEN}
         style={{ width: '100%', height: '100%' }}
       >
@@ -287,6 +293,15 @@ function App() {
             <span>Pure Speed</span>
           </div>
         </div>
+
+        {/* FIND ROUTE BUTTON */}
+        <button
+          onClick={handleFindRoute}
+          disabled={!originCoords || !destinationCoords || loading}
+          className="mt-6 w-full h-[44px] rounded-[10px] bg-green-500 hover:bg-green-400 text-gray-900 text-sm font-semibold transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Finding route...' : 'Find route'}
+        </button>
       </div>
 
       {/* ANALYTICS CARD (shows as soon as both pins are set; zeros for now) */}
