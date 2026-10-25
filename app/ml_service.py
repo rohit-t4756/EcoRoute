@@ -1,6 +1,7 @@
 import redis
 import os
 import time
+import requests
 import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
@@ -35,6 +36,10 @@ class MLTrafficBridge:
             'alleyways': 0
         }
 
+        # In-memory weather cache (5-minute TTL)
+        self._weather_cache = None
+        self._weather_cache_time = 0
+
     def connection_verification(self) -> bool:
         try:
             return self.r.ping()
@@ -47,15 +52,38 @@ class MLTrafficBridge:
             result = conn.execute(text("SELECT id FROM edges"))
             return [row.id for row in result]
 
+    def get_current_weather(self, lat: float = 18.5204, lon: float = 73.8567) -> tuple[float, float]:
+        """
+        Fetches real-time precipitation (mm) and temperature (C) for Pune from Open-Meteo API.
+        Includes a lightweight 5-minute memory cache to prevent spamming the API.
+        """
+        current_ts = time.time()
+        if self._weather_cache is not None and (current_ts - self._weather_cache_time < 300):
+            return self._weather_cache
+
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,precipitation"
+        try:
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                current_data = res.json().get("current", {})
+                rain = float(current_data.get("precipitation", 0.0))
+                temp = float(current_data.get("temperature_2m", 28.0))
+                self._weather_cache = (rain, temp)
+                self._weather_cache_time = current_ts
+                return rain, temp
+        except Exception as e:
+            print(f"Weather API notice: {e}. Using fallback defaults.")
+
+        return 0.0, 28.0
+
     def update_edge_weights(self, edgeIDs: list[int]):
         now = datetime.now()
         hour = now.hour
         day = now.weekday()
         is_peak = 1 if (8 <= hour <= 11 or 17 <= hour <= 21) else 0
 
-        # TODO: Turn these into API calls @Pranav
-        rain_mm = 0.0  
-        temperature_2m = 28.0  
+        # Real-time weather fetched live via Open-Meteo API for Pune (@Pranav)
+        rain_mm, temperature_2m = self.get_current_weather()
 
         # 1. Fetch real road classifications and speeds from PostGIS
         edge_data = {}
