@@ -19,6 +19,12 @@ services:
       - "${REDIS_HOST_PORT}:${REDIS_CONTAINER_PORT}"
     volumes:
       - redis_data:/data
+  
+  frontend:
+    build: ./app/frontend
+    container_name: ecoroute_frontend
+    ports:
+      - "5173:5173"
 
 volumes:
   postgres_data:
