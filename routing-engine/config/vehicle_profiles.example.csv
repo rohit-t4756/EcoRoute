@@ -1,0 +1,5 @@
+id,type,consumption_per_100km,auxiliary_consumption_per_hour,co2e_grams_per_unit,mass_kg,wheel_energy_kwh_per_unit,downhill_propulsion_fraction,regenerative_recovery_fraction
+petrol_demo,petrol,7,0.8,2300,,,1,0
+diesel_demo,diesel,6,0.6,2700,,,1,0
+hybrid_demo,hybrid,4.5,0.3,2300,,,1,0
+electric_demo,electric,18,1.2,400,,,1,0
