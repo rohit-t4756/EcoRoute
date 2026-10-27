@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    g++ cmake ninja-build zlib1g-dev libgomp1 libpq5 && rm -rf /var/lib/apt/lists/*
+COPY requirements-routing.txt ./
+RUN pip install --no-cache-dir -r requirements-routing.txt
+COPY routing-engine ./routing-engine
+COPY scripts/integration ./scripts/integration
+RUN cmake -S routing-engine -B routing-engine/build/release -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DECOROUTE_BUILD_BENCHMARKS=OFF \
+    && cmake --build routing-engine/build/release --parallel 4
+ENV PYTHONUNBUFFERED=1
+EXPOSE 50051
+CMD ["sh","-c","python scripts/integration/prepare_graph.py && python routing-engine/integration/grpc_server.py"]

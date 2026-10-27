@@ -149,6 +149,7 @@ struct Engine::Impl {
             }
         }
         AlternativeRouteOptions route_options;
+        route_options.verify_graph_identity = false; // bound to this immutable graph at Engine::create
         route_options.selected_time_preference = request.urgency_preference;
         route_options.neighboring_steps_each_side = 0; // Prefetch is opt-in in the lower-level API.
         route_options.max_pool_routes = 3;

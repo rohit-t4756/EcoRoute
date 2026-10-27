@@ -1,9 +1,13 @@
 import redis
 import os
 import time
+import csv
+import json
+import uuid
+from pathlib import Path
 import requests
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from scripts.ml_pipeline.inference import get_predictor
 from sqlalchemy import create_engine, text
@@ -18,14 +22,16 @@ class MLTrafficBridge:
             port = int(os.getenv("REDIS_CONTAINER_PORT") or 6379),
             decode_responses = True
         )
-        self.pipe = self.r.pipeline()
+        self.pipe = self.r.pipeline(transaction=True)
 
         # ML predictor setup
         model_path = os.path.join("app", "ml", "traffic_model.onnx")
         self.predictor = get_predictor(model_path)
 
         # POSTGIS connection setup
-        db_url = os.getenv("DATABASE_URL") or "postgresql+psycopg2://my_ADMIN:helloEcoroute@localhost:5432/ecorouteDB"
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            raise ValueError("DATABASE_URL must be configured; do not use hardcoded credentials")
         self.engine = create_engine(db_url)
 
         self.category_map = {
@@ -47,10 +53,16 @@ class MLTrafficBridge:
             return False
 
     def fetch_all_edge_ids(self) -> list[int]:
-        """Fetches all edge IDs dynamically from the PostGIS database."""
+        """Live PostGIS edges, or demo snapshot IDs when database is empty."""
         with self.engine.connect() as conn:
-            result = conn.execute(text("SELECT id FROM edges"))
-            return [row.id for row in result]
+            rows = conn.execute(text("SELECT id FROM edges ORDER BY id")).fetchall()
+        if rows:
+            return [row.id for row in rows]
+        graph = json.loads(Path('/data/active_graph.json').read_text(encoding='utf-8'))
+        if graph['source'] != 'synthetic-demo':
+            return []
+        with (Path(graph['directory'])/'edges.csv').open(newline='',encoding='utf-8') as fp:
+            return [int(row['edge_id']) for row in csv.DictReader(fp)]
 
     def get_current_weather(self, lat: float = 18.5204, lon: float = 73.8567) -> tuple[float, float]:
         """
@@ -77,7 +89,12 @@ class MLTrafficBridge:
         return 0.0, 28.0
 
     def update_edge_weights(self, edgeIDs: list[int]):
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            now = now.astimezone(ZoneInfo("Asia/Kolkata"))
+        except Exception:
+            now = now.astimezone()
         hour = now.hour
         day = now.weekday()
         is_peak = 1 if (8 <= hour <= 11 or 17 <= hour <= 21) else 0
@@ -92,7 +109,7 @@ class MLTrafficBridge:
             result = conn.execute(query, {"ids": edgeIDs})
             
             for row in result:
-                tier = self.category_map.get(row.road_category, 0)
+                tier = self.category_map.get(str(row.road_category), 0)
                 speed_limit = row.speed_limit if row.speed_limit else (30 if tier == 0 else (50 if tier == 1 else 80))
                 
                 lanes = 1 if tier == 0 else (2 if tier == 1 else 3)
@@ -105,6 +122,22 @@ class MLTrafficBridge:
                     "oneway": is_oneway
                 }
 
+        # In the synthetic demonstration, the DB intentionally has no roads.
+        # Use the graph snapshot's actual directed edge IDs and attributes.
+        if not edge_data and edgeIDs:
+            try:
+                graph = json.loads(Path('/data/active_graph.json').read_text(encoding='utf-8'))
+                if graph['source'] == 'synthetic-demo':
+                    with (Path(graph['directory'])/'edges.csv').open(newline='',encoding='utf-8') as fp:
+                        for row in csv.DictReader(fp):
+                            tier = self.category_map.get(row['road_class'], 1)
+                            edge_data[int(row['edge_id'])] = {
+                                'tier':tier, 'speed':float(row['speed_limit_kph'] or 30),
+                                'lanes':1 if tier == 0 else (2 if tier == 1 else 3),
+                                'oneway':0}
+            except (OSError,KeyError,ValueError):
+                pass
+
         # 2. Build the 9-feature matrix
         features = []
         for edge_id in edgeIDs:
@@ -116,19 +149,38 @@ class MLTrafficBridge:
         # 3. Execute batch inference
         predictions = self.predictor.predict_batch(np.array(features))
         
-        # 4. Push real predictions to Redis
+        # 4. Publish one IMMUTABLE batch; the latest pointer is written last.
+        # This prevents C++ from observing a mixture of old/new factor values.
+        import math
+        values = {}
         for i, edge_id in enumerate(edgeIDs):
-            try:
-                self.pipe.set(
-                    name = f"edge_weight:{edge_id}",
-                    value = round(float(predictions[i]), 3),
-                    ex = 300
-                )
-            except Exception:
-                pass
+            value = float(predictions[i])
+            if not math.isfinite(value):
+                raise ValueError(f'Nonfinite prediction for edge {edge_id}')
+            values[str(edge_id)] = str(round(max(1.0, min(value, 5.0)), 5))
+        if len(values) != len(edgeIDs):
+            raise ValueError('Duplicate edge identifiers; cannot publish traffic')
+        graph = json.loads(Path('/data/active_graph.json').read_text(encoding='utf-8'))
+        published = int(time.time())
+        version = f'ml-{published}-{uuid.uuid4().hex[:8]}'
+        ttl = max(900, int(os.getenv('ML_INTERVAL_SECONDS','300'))*3)
+        metadata = {
+            'graph_version':graph['graph_version'], 'traffic_version':version,
+            'valid_from_unix_seconds':max(0,published-120),
+            'valid_until_unix_seconds':published+ttl-60}
+        key='traffic:batch:'+version
+        with self.r.pipeline(transaction=True) as pipe:
+            for start in range(0,len(values),2000):
+                batch=dict(list(values.items())[start:start+2000])
+                pipe.hset(key,mapping=batch)
+            pipe.expire(key,ttl)
+            # Legacy per-edge keys retained for teammate compatibility (not used by C++).
+            for edge_id, factor in values.items():
+                pipe.set('edge_weight:'+edge_id,factor,ex=ttl)
+            pipe.set('traffic:latest',json.dumps(metadata,separators=(',',':')),ex=ttl)
+            pipe.execute()
+        return f'Published ML traffic batch {version} for {len(edgeIDs)} directed edges.'
 
-        self.pipe.execute()
-        return f"Successfully cached ML weights for {len(edgeIDs)} edges."
 
 
 if __name__ == "__main__":
@@ -160,5 +212,5 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Worker Error: {e}")
                 
-            print("Cycle complete. Sleeping for 5 minutes...")
-            time.sleep(20) # Sleep for 300 seconds (5 minutes)
+            print("Cycle complete. Waiting for next prediction interval...")
+            time.sleep(int(os.getenv("ML_INTERVAL_SECONDS", "300")))

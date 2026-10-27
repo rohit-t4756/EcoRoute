@@ -8,8 +8,6 @@
  * Remaining: None for the current data structures
  */
 
-#pragma once
-
 #include <cstddef>
 #include <cstdint>
 #include <string>

@@ -1,0 +1,11 @@
+syntax = "proto3";
+package ecoroute.gateway.v1;
+import "google/protobuf/struct.proto";
+// Live transport is a Python gRPC gateway to the C++ CLI worker.
+// The body is Struct so arbitrary versioned C++ JSON responses retain their
+// fields; road_segment_ids remain decimal strings to avoid uint64 truncation.
+service RoutingGateway {
+  rpc Route(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc Health(google.protobuf.Struct) returns (google.protobuf.Struct);
+  rpc UpdateTraffic(google.protobuf.Struct) returns (google.protobuf.Struct);
+}

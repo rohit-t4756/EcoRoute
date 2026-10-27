@@ -1,0 +1,6 @@
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
+grpcio>=1.60,<2
+protobuf>=5,<7
+redis>=5,<9
+asyncpg>=0.29,<1

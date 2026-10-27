@@ -8,7 +8,7 @@
  * Remaining: Real-network candidate quality and prefetch benchmarking.
  *
  * Note:
- * The default provider changes/querys the CCH metric atomically. Runtime
+ * The default provider changes/queries the CCH metric atomically. Runtime
  * callers may supply a provider backed by independent cached metrics.
  */
 
@@ -138,7 +138,7 @@ Result<std::vector<RouteCandidate>> generateAlternativeRoutes(
         );
     }
 
-    if (!cch.matchesGraph(graph)) {
+    if (options.verify_graph_identity && !cch.matchesGraph(graph)) {
         return CandidateResult::failure(ErrorCode::InvalidGraph,
             "CCH topology does not match the supplied CSR graph.");
     }

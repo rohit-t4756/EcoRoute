@@ -192,9 +192,19 @@ Result<RouteMetrics> estimateSegmentMetrics(
     // 2. Travel time.
     // --------------------------------------------------
 
-    double speed_kph = segment.speed_limit_kph.value_or(
-        options.fallback_speed_kph
-    );
+    // If PostGIS lacks maxspeed, road class supplies a conservative default.
+    // Explicit measured speed limits always take precedence; these estimates
+    // are not legal speed limits and should be calibrated with regional data.
+    double speed_kph = options.fallback_speed_kph;
+    if (!segment.speed_limit_kph && segment.road_class) {
+        const auto& kind = *segment.road_class;
+        if (kind == "express_and_highways" || kind == "motorway") speed_kph = 75.0;
+        else if (kind == "arterial_roads" || kind == "trunk" || kind == "primary") speed_kph = 50.0;
+        else if (kind == "district_roads" || kind == "secondary") speed_kph = 35.0;
+        else if (kind == "rural_roads" || kind == "residential") speed_kph = 30.0;
+        else if (kind == "alleyways" || kind == "living_street" || kind == "service") speed_kph = 15.0;
+    }
+    if (segment.speed_limit_kph) speed_kph = *segment.speed_limit_kph;
 
     double reference_time_seconds =
         3.6 * segment.length_meters / speed_kph;

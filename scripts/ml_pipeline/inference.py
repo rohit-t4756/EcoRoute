@@ -197,8 +197,17 @@ class TrafficCongestionPredictor:
                 temps             # temp
             ]).astype(np.float32)
 
+        # Both trained 4-feature and enhanced 9-feature ONNX artifacts are
+        # supported. The worker always supplies the richer 9-feature input.
+        if input_data.shape[1] == 9 and self.num_features == 4:
+            input_data = input_data[:, [0, 1, 3, 7]]  # hour, day, road tier, precipitation
+        if input_data.shape[1] != self.num_features:
+            raise ValueError(f"Model expects {self.num_features} features, received {input_data.shape[1]}")
         raw_output = self.session.run([self.output_name], {self.input_name: input_data})
-        return raw_output[0].flatten()
+        result = np.asarray(raw_output[0], dtype=float).reshape(-1)
+        if len(result) != len(input_data) or not np.isfinite(result).all():
+            raise ValueError("ONNX predictor returned invalid congestion values")
+        return result
 
 
 _predictor_instance = None

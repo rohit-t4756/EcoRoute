@@ -44,16 +44,20 @@ class EngineProcess:
         self._lock = threading.Lock()
         self._process = None
         self._responses = None
+        self._latest_traffic_dir = None
 
     def _start(self):
         if self._process and self._process.poll() is None:
             return
         self._stop()
         self._responses = queue.Queue()
-        self._process = subprocess.Popen(
+        try:
+            self._process = subprocess.Popen(
             [self.executable, "--config", self.configuration, "--serve"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", bufsize=1)
+        except OSError as error:
+            raise EngineError("Unavailable", "C++ worker executable cannot start") from error
         process, responses = self._process, self._responses
         def read():
             try:
@@ -62,6 +66,9 @@ class EngineProcess:
             finally:
                 responses.put(None)
         threading.Thread(target=read, daemon=True).start()
+        if self._latest_traffic_dir:
+            # Re-synchronize after any worker crash/timeout before serving a query.
+            self._exchange_unlocked("update " + _text(self._latest_traffic_dir))
 
     def _stop(self):
         if self._process:
@@ -88,33 +95,39 @@ class EngineProcess:
     def __exit__(self, *args):
         self.close()
 
+    def _exchange_unlocked(self, command):
+        try:
+            self._process.stdin.write(command + "\n")
+            self._process.stdin.flush()
+            line = self._responses.get(timeout=self.timeout)
+            if line is None:
+                raise EngineError("Unavailable", "C++ worker exited")
+            result = json.loads(line)
+            if "error" in result:
+                raise EngineError(result["error"]["code"], result["error"]["message"])
+            return result
+        except queue.Empty as error:
+            self._stop()
+            raise EngineError("DeadlineExceeded", "C++ worker request timed out") from error
+        except (OSError, json.JSONDecodeError) as error:
+            self._stop()
+            raise EngineError("Unavailable", "C++ worker protocol failure") from error
+
     def command(self, command):
         if "\n" in command or "\r" in command or len(command.encode("utf-8")) > 65536:
             raise ValueError("Invalid or oversized command")
         with self._lock:
             self._start()
-            try:
-                self._process.stdin.write(command + "\n")
-                self._process.stdin.flush()
-                line = self._responses.get(timeout=self.timeout)
-                if line is None:
-                    raise EngineError("Unavailable", "C++ worker exited")
-                result = json.loads(line)
-                if "error" in result:
-                    raise EngineError(result["error"]["code"], result["error"]["message"])
-                return result
-            except queue.Empty as error:
-                self._stop()
-                raise EngineError("DeadlineExceeded", "C++ worker request timed out") from error
-            except (OSError, json.JSONDecodeError) as error:
-                self._stop()
-                raise EngineError("Unavailable", "C++ worker protocol failure") from error
+            return self._exchange_unlocked(command)
 
     def health(self):
         return self.command("health")
 
     def update_traffic(self, directory):
-        return self.command("update " + _text(str(Path(directory).resolve())))
+        location = str(Path(directory).resolve())
+        result = self.command("update " + _text(location))
+        self._latest_traffic_dir = location
+        return result
 
     def route(self, *, vehicle_profile_id, preference, departure_time_unix_seconds,
               source_node_id=None, target_node_id=None, origin=None, destination=None,

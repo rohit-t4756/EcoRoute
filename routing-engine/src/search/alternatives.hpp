@@ -70,6 +70,10 @@ struct RouteCandidate {
 
 struct AlternativeRouteOptions {
 
+    // Full CSR topology validation is needed for public callers. The Engine
+    // has already bound its immutable graph at construction, so can skip it.
+    bool verify_graph_identity = true;
+
     // User-selected time importance, in [0, 1].
     double selected_time_preference = 0.5;
 
